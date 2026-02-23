@@ -72,20 +72,36 @@ def get_stats():
 def get_balance():
     """Obtener balance de TraffiLink"""
     try:
+        logger.info("Consultando balance de TraffiLink...")
         resultado = traffilink.consultar_balance()
+
+        logger.info(f"Resultado de balance: {resultado}")
 
         if resultado.get('exito'):
             return jsonify({
+                'exito': True,
                 'balance': resultado.get('balance'),
                 'moneda': 'EUR',
                 'timestamp': datetime.now().isoformat()
             }), 200
         else:
-            return jsonify({'error': resultado.get('error')}), 400
+            error_msg = resultado.get('error', 'Error desconocido')
+            logger.warning(f"Error en TraffiLink: {error_msg}")
+            return jsonify({
+                'exito': False,
+                'balance': None,
+                'error': error_msg,
+                'mensaje': 'No se pudo conectar con TraffiLink. Verifica las credenciales en Render'
+            }), 200  # Retornar 200 igual para que el frontend no lance error
 
     except Exception as e:
-        logger.error(f"Error consultando balance: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error consultando balance: {e}", exc_info=True)
+        return jsonify({
+            'exito': False,
+            'balance': None,
+            'error': str(e),
+            'mensaje': 'Error de conexión con TraffiLink'
+        }), 200  # Retornar 200 para que el frontend maneje
 
 # ============================================================================
 # RUTAS - SMS OPERATIONS
@@ -280,6 +296,33 @@ def webhook_traffilink():
 
     except Exception as e:
         logger.error(f"Error en webhook: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================================
+# DIAGNOSTICO
+# ============================================================================
+
+@app.route('/api/diagnostic')
+def diagnostic():
+    """Endpoint de diagnostico"""
+    try:
+        diag = {
+            'timestamp': datetime.now().isoformat(),
+            'database': 'OK',
+            'traffilink': {
+                'configured': bool(config.TRAFFILINK_ACCOUNT and config.TRAFFILINK_PASSWORD),
+                'account': config.TRAFFILINK_ACCOUNT if config.TRAFFILINK_ACCOUNT else 'NOT SET',
+                'password': '***' if config.TRAFFILINK_PASSWORD else 'NOT SET',
+                'url': config.TRAFFILINK_URL
+            },
+            'stats': db.obtener_stats()
+        }
+
+        logger.info(f"Diagnostic check: OK")
+        return jsonify(diag), 200
+
+    except Exception as e:
+        logger.error(f"Error en diagnostic: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 # ============================================================================
