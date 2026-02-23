@@ -35,27 +35,49 @@ class TraffiLinkAPI:
     def consultar_balance(self):
         """Consulta balance disponible (EUR)"""
         try:
+            if not self.account or not self.password:
+                logger.error("Credenciales TraffiLink no configuradas")
+                return {'exito': False, 'error': 'Credenciales no configuradas'}
+
             params = f"account={self.account}"
             sign = self.generar_sign(params)
-            
+
+            if not sign:
+                logger.error("Error generando firma")
+                return {'exito': False, 'error': 'Error generando firma'}
+
             url = f"{self.url_base}/queryBalance"
             data = {'account': self.account, 'sign': sign}
-            
-            logger.info("🔍 Consultando balance TraffiLink...")
+
+            logger.info(f"Consultando balance en {url} con account {self.account}")
             response = requests.get(url, params=data, timeout=self.timeout)
+            logger.info(f"Status: {response.status_code}")
+
             resultado = response.json()
-            
+
             if resultado.get('status') == '1':
                 balance = float(resultado.get('balance', 0))
-                logger.info(f"✅ Balance: {balance} EUR")
+                logger.info(f"Balance obtenido: {balance} EUR")
                 return {'exito': True, 'balance': balance}
             else:
                 error = resultado.get('message', 'Error desconocido')
-                logger.warning(f"❌ Error: {error}")
+                logger.warning(f"Error TraffiLink: {error}")
                 return {'exito': False, 'error': error}
-        
+
+        except requests.exceptions.Timeout:
+            logger.error("Timeout en TraffiLink")
+            return {'exito': False, 'error': 'Timeout - TraffiLink no responde'}
+
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Error conexion: {e}")
+            return {'exito': False, 'error': f"Error conexion: {str(e)}"}
+
+        except ValueError as e:
+            logger.error(f"JSON invalido: {e}")
+            return {'exito': False, 'error': 'Respuesta invalida de TraffiLink'}
+
         except Exception as e:
-            logger.error(f"❌ Error consultando balance: {e}")
+            logger.error(f"Error inesperado: {e}", exc_info=True)
             return {'exito': False, 'error': str(e)}
     
     def enviar_sms(self, numero, contenido, queue_id):
