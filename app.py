@@ -1,354 +1,333 @@
 """
-SMS Marketing API - Flask Application
-Optimizado para Render
+Aplicación web Flask para Goleador SMS Marketing
+Dashboard y panel de control
 """
-
 import logging
-import os
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify
-
-from config import config
-from database import db
-from traffilink_api import traffilink
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask_cors import CORS
+from datetime import datetime, timedelta
+from auth import SessionManager
+from report_generator import ReportGenerator
+from analytics import Analytics
+from task_manager import TaskManager
+from sms_sender import SMSSender
+from cache import BalanceCache
 
 # Configurar logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('app.log')
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Crear aplicación Flask
 app = Flask(__name__)
-app.config['JSON_SORT_KEYS'] = False
+app.secret_key = "goleador_sms_marketing_secret_key"
+CORS(app)
 
-# ============================================================================
-# RUTAS - HEALTH & STATS
-# ============================================================================
+# Inicializar componentes
+session_manager = SessionManager()
+report_gen = ReportGenerator()
+analytics = Analytics()
+task_manager = TaskManager()
+sms_sender = SMSSender()
+balance_cache = BalanceCache(ttl=300)
 
-@app.route('/')
+logger.info("🚀 Aplicación Flask inicializada")
+
+
+# ==================== RUTAS PRINCIPALES ====================
+
+@app.route("/")
 def index():
+    """Página principal"""
+    logger.info("📄 GET /")
+    # ⚠️ AUTENTICACIÓN DESHABILITADA - Acceso directo al dashboard
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """Página de login"""
+    logger.info(f"📝 {request.method} /login")
+    # ⚠️ AUTENTICACIÓN DESHABILITADA - Acceso directo al dashboard
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/logout")
+def logout():
+    """Cerrar sesión"""
+    logger.info("👋 GET /logout")
+    session_manager.end_session()
+    return redirect(url_for("login"))
+
+
+@app.route("/dashboard")
+def dashboard():
     """Dashboard principal"""
-    try:
-        stats = db.obtener_stats()
-        return render_template('index.html', stats=stats)
-    except Exception as e:
-        logger.error(f"Error en index: {e}")
-        return jsonify({'error': str(e)}), 500
+    logger.info("📊 GET /dashboard")
+    # ⚠️ AUTENTICACIÓN DESHABILITADA - Acceso directo
+    return render_template("dashboard.html")
 
-@app.route('/api/health')
-def health():
-    """Health check"""
+
+# ==================== API: DASHBOARD ====================
+
+@app.route("/api/dashboard/stats")
+def api_dashboard_stats():
+    """Obtener estadísticas del dashboard"""
+    logger.info("📊 GET /api/dashboard/stats")
+
     try:
-        stats = db.obtener_stats()
-        balance = traffilink.consultar_balance()
+        kpis = analytics.calculate_kpis()
+        summary = report_gen.generate_activity_summary()
 
         return jsonify({
-            'status': 'ok',
-            'timestamp': datetime.now().isoformat(),
-            'stats': stats,
-            'balance': balance.get('balance') if balance.get('exito') else 'N/A'
-        }), 200
+            "code": 0,
+            "data": {
+                "kpis": kpis,
+                "summary": summary["summary"]
+            }
+        })
     except Exception as e:
-        logger.error(f"Error en health: {e}")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-@app.route('/api/stats')
-def get_stats():
-    """Obtener estadísticas"""
+
+@app.route("/api/dashboard/balance")
+def api_dashboard_balance():
+    """Obtener balance de la cuenta"""
+    logger.info("📊 GET /api/dashboard/balance")
+
     try:
-        stats = db.obtener_stats()
-        return jsonify(stats), 200
-    except Exception as e:
-        logger.error(f"Error en stats: {e}")
-        return jsonify({'error': str(e)}), 500
+        # Verificar caché
+        cached = balance_cache.get_balance()
+        if cached:
+            logger.info("✅ Balance desde caché")
+            return jsonify({"code": 0, "data": cached})
 
-@app.route('/api/balance')
-def get_balance():
-    """Obtener balance de TraffiLink"""
-    try:
-        logger.info("Consultando balance de TraffiLink...")
-        resultado = traffilink.consultar_balance()
+        # Obtener de la API
+        result = sms_sender.api.get_balance()
 
-        logger.info(f"Resultado de balance: {resultado}")
-
-        if resultado.get('exito'):
-            return jsonify({
-                'exito': True,
-                'balance': resultado.get('balance'),
-                'moneda': 'EUR',
-                'timestamp': datetime.now().isoformat()
-            }), 200
+        if result.get("code") == 0:
+            balance_cache.set_balance(result)
+            return jsonify({"code": 0, "data": result})
         else:
-            error_msg = resultado.get('error', 'Error desconocido')
-            logger.warning(f"Error en TraffiLink: {error_msg}")
-            return jsonify({
-                'exito': False,
-                'balance': None,
-                'error': error_msg,
-                'mensaje': 'No se pudo conectar con TraffiLink. Verifica las credenciales en Render'
-            }), 200  # Retornar 200 igual para que el frontend no lance error
+            return jsonify(result), 400
 
     except Exception as e:
-        logger.error(f"Error consultando balance: {e}", exc_info=True)
-        return jsonify({
-            'exito': False,
-            'balance': None,
-            'error': str(e),
-            'mensaje': 'Error de conexión con TraffiLink'
-        }), 200  # Retornar 200 para que el frontend maneje
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-# ============================================================================
-# RUTAS - SMS OPERATIONS
-# ============================================================================
 
-@app.route('/api/sms/send', methods=['POST'])
-def send_sms():
-    """Enviar un SMS individual"""
+@app.route("/api/dashboard/hourly")
+def api_dashboard_hourly():
+    """Obtener distribución por hora"""
+    logger.info("📊 GET /api/dashboard/hourly")
+
+    try:
+        hourly = analytics.get_hourly_distribution()
+        return jsonify({"code": 0, "data": hourly})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+@app.route("/api/dashboard/insights")
+def api_dashboard_insights():
+    """Obtener insights automáticos"""
+    logger.info("💡 GET /api/dashboard/insights")
+
+    try:
+        insights = analytics.generate_insights()
+        return jsonify({"code": 0, "data": insights})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+# ==================== API: SMS ====================
+
+@app.route("/api/sms/send", methods=["POST"])
+def api_sms_send():
+    """Enviar SMS"""
+    logger.info("📤 POST /api/sms/send")
+
     try:
         data = request.get_json()
 
-        numero = data.get('numero', '').strip()
-        contenido = data.get('mensaje', '').strip()
+        result = sms_sender.send_sms(
+            numbers=data.get("numbers", []),
+            content=data.get("content", ""),
+            sender=data.get("sender")
+        )
 
-        # Validar
-        if not numero:
-            return jsonify({'error': 'Numero requerido'}), 400
-        if not contenido:
-            return jsonify({'error': 'Mensaje requerido'}), 400
-
-        # Agregar a DB
-        sms_id = db.agregar_sms(numero, contenido)
-        if not sms_id:
-            return jsonify({'error': 'SMS duplicado recientemente'}), 409
-
-        # Enviar a TraffiLink
-        resultado = traffilink.enviar_sms(numero, contenido, str(sms_id))
-
-        if resultado.get('exito'):
-            db.actualizar_sms(
-                sms_id,
-                status='sent',
-                traffilink_id=resultado.get('traffilink_id')
-            )
-
-            return jsonify({
-                'exito': True,
-                'sms_id': sms_id,
-                'traffilink_id': resultado.get('traffilink_id'),
-                'numero': numero,
-                'status': 'sent'
-            }), 200
-        else:
-            db.actualizar_sms(
-                sms_id,
-                status='failed',
-                error_msg=resultado.get('error')
-            )
-
-            return jsonify({
-                'exito': False,
-                'sms_id': sms_id,
-                'error': resultado.get('error')
-            }), 400
-
+        return jsonify(result)
     except Exception as e:
-        logger.error(f"Error enviando SMS: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-@app.route('/api/sms/send-batch', methods=['POST'])
-def send_batch():
-    """Enviar multiplesms SMS"""
+
+@app.route("/api/sms/history")
+def api_sms_history():
+    """Obtener histórico de SMS"""
+    logger.info("📋 GET /api/sms/history")
+
+    try:
+        limit = request.args.get("limit", 100, type=int)
+        sms_list = report_gen.db.get_all_sms(limit=limit)
+
+        return jsonify({"code": 0, "data": sms_list})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+# ==================== API: REPORTES ====================
+
+@app.route("/api/reports/sms")
+def api_reports_sms():
+    """Obtener reporte de SMS"""
+    logger.info("📊 GET /api/reports/sms")
+
+    try:
+        report = report_gen.generate_sms_report()
+        return jsonify({"code": 0, "data": report})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+@app.route("/api/reports/delivery")
+def api_reports_delivery():
+    """Obtener reporte de entrega"""
+    logger.info("📋 GET /api/reports/delivery")
+
+    try:
+        report = report_gen.generate_delivery_report()
+        return jsonify({"code": 0, "data": report})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+@app.route("/api/reports/transactions")
+def api_reports_transactions():
+    """Obtener reporte de transacciones"""
+    logger.info("💰 GET /api/reports/transactions")
+
+    try:
+        report = report_gen.generate_transaction_report()
+        return jsonify({"code": 0, "data": report})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+# ==================== API: TAREAS ====================
+
+@app.route("/api/tasks/create", methods=["POST"])
+def api_tasks_create():
+    """Crear nueva tarea"""
+    logger.info("➕ POST /api/tasks/create")
+
     try:
         data = request.get_json()
-        sms_list = data.get('sms', [])
 
-        if not sms_list:
-            return jsonify({'error': 'Lista de SMS vacia'}), 400
+        task_id = task_manager.create_task(
+            task_type=data.get("task_type", 0),
+            contacts=data.get("contacts", []),
+            content=data.get("content", ""),
+            sender=data.get("sender"),
+            sendtime=data.get("sendtime"),
+            interval=data.get("interval"),
+            endtime=data.get("endtime")
+        )
 
-        if len(sms_list) > 100:
-            return jsonify({'error': 'Maximo 100 SMS por batch'}), 400
-
-        resultados = []
-
-        for sms in sms_list:
-            numero = sms.get('numero', '').strip()
-            contenido = sms.get('mensaje', '').strip()
-
-            if not numero or not contenido:
-                resultados.append({'error': 'Numero o mensaje vacio'})
-                continue
-
-            # Agregar a DB
-            sms_id = db.agregar_sms(numero, contenido)
-            if not sms_id:
-                resultados.append({
-                    'numero': numero,
-                    'error': 'SMS duplicado'
-                })
-                continue
-
-            # Enviar
-            resultado = traffilink.enviar_sms(numero, contenido, str(sms_id))
-
-            if resultado.get('exito'):
-                db.actualizar_sms(
-                    sms_id,
-                    status='sent',
-                    traffilink_id=resultado.get('traffilink_id')
-                )
-                resultados.append({
-                    'sms_id': sms_id,
-                    'numero': numero,
-                    'status': 'sent',
-                    'traffilink_id': resultado.get('traffilink_id')
-                })
-            else:
-                db.actualizar_sms(
-                    sms_id,
-                    status='failed',
-                    error_msg=resultado.get('error')
-                )
-                resultados.append({
-                    'sms_id': sms_id,
-                    'numero': numero,
-                    'status': 'failed',
-                    'error': resultado.get('error')
-                })
-
-        return jsonify({
-            'total': len(sms_list),
-            'resultados': resultados
-        }), 200
-
+        return jsonify({"code": 0, "task_id": task_id})
     except Exception as e:
-        logger.error(f"Error en batch: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-@app.route('/api/sms/status/<int:sms_id>')
-def get_sms_status(sms_id):
-    """Consultar estado de un SMS"""
+
+@app.route("/api/tasks/list")
+def api_tasks_list():
+    """Listar tareas"""
+    logger.info("📋 GET /api/tasks/list")
+
     try:
-        sms = db.obtener_sms(sms_id)
+        status = request.args.get("status")
+        tasks = task_manager.list_tasks(status=status)
 
-        if not sms:
-            return jsonify({'error': 'SMS no encontrado'}), 404
-
-        # Si esta en pending y tenemos traffilink_id, consultar estado
-        if sms['status'] == 'sent' and sms['traffilink_id']:
-            resultado = traffilink.consultar_estado(sms['traffilink_id'])
-
-            if resultado.get('exito'):
-                nuevo_estado = resultado.get('estado')
-                if nuevo_estado != 'pending':
-                    db.actualizar_sms(sms_id, status=nuevo_estado)
-                    sms['status'] = nuevo_estado
-
-        return jsonify({
-            'id': sms['id'],
-            'numero': sms['numero'],
-            'contenido': sms['contenido'],
-            'status': sms['status'],
-            'traffilink_id': sms['traffilink_id'],
-            'error': sms['error_msg'],
-            'created_at': sms['created_at'],
-            'updated_at': sms['updated_at']
-        }), 200
-
+        return jsonify({"code": 0, "data": tasks})
     except Exception as e:
-        logger.error(f"Error consultando estado: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-# ============================================================================
-# RUTAS - WEBHOOKS
-# ============================================================================
 
-@app.route('/webhook/traffilink', methods=['POST'])
-def webhook_traffilink():
-    """Webhook para reportes de TraffiLink"""
+@app.route("/api/tasks/<task_id>/pause", methods=["POST"])
+def api_tasks_pause(task_id):
+    """Pausar tarea"""
+    logger.info(f"⏸️  POST /api/tasks/{task_id}/pause")
+
     try:
-        datos = request.get_json()
-
-        if not datos:
-            return jsonify({'error': 'No data'}), 400
-
-        resultado = traffilink.procesar_webhook(datos)
-
-        if resultado.get('exito'):
-            traffilink_id = resultado.get('traffilink_id')
-            estado = resultado.get('estado')
-
-            logger.info(f"Webhook procesado: {traffilink_id} -> {estado}")
-
-            return jsonify({
-                'status': 'ok',
-                'message': 'Report received',
-                'traffilink_id': traffilink_id,
-                'estado': estado
-            }), 200
-        else:
-            return jsonify({'error': resultado.get('error')}), 400
-
+        task_manager.pause_task(task_id)
+        return jsonify({"code": 0, "message": "Tarea pausada"})
     except Exception as e:
-        logger.error(f"Error en webhook: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-# ============================================================================
-# DIAGNOSTICO
-# ============================================================================
 
-@app.route('/api/diagnostic')
-def diagnostic():
-    """Endpoint de diagnostico"""
+@app.route("/api/tasks/<task_id>/resume", methods=["POST"])
+def api_tasks_resume(task_id):
+    """Reanudar tarea"""
+    logger.info(f"▶️  POST /api/tasks/{task_id}/resume")
+
     try:
-        diag = {
-            'timestamp': datetime.now().isoformat(),
-            'database': 'OK',
-            'traffilink': {
-                'configured': bool(config.TRAFFILINK_ACCOUNT and config.TRAFFILINK_PASSWORD),
-                'account': config.TRAFFILINK_ACCOUNT if config.TRAFFILINK_ACCOUNT else 'NOT SET',
-                'password': '***' if config.TRAFFILINK_PASSWORD else 'NOT SET',
-                'url': config.TRAFFILINK_URL
-            },
-            'stats': db.obtener_stats()
-        }
-
-        logger.info(f"Diagnostic check: OK")
-        return jsonify(diag), 200
-
+        task_manager.resume_task(task_id)
+        return jsonify({"code": 0, "message": "Tarea reanudada"})
     except Exception as e:
-        logger.error(f"Error en diagnostic: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
 
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
+
+@app.route("/api/tasks/<task_id>/cancel", methods=["POST"])
+def api_tasks_cancel(task_id):
+    """Cancelar tarea"""
+    logger.info(f"❌ POST /api/tasks/{task_id}/cancel")
+
+    try:
+        task_manager.cancel_task(task_id)
+        return jsonify({"code": 0, "message": "Tarea cancelada"})
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}")
+        return jsonify({"code": -1, "error": str(e)}), 500
+
+
+# ==================== MANEJO DE ERRORES ====================
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Endpoint no encontrado'}), 404
+    """Página no encontrada"""
+    logger.warning(f"404: {request.path}")
+    return jsonify({"code": 404, "error": "Página no encontrada"}), 404
+
 
 @app.errorhandler(500)
-def server_error(error):
-    return jsonify({'error': 'Error interno del servidor'}), 500
+def internal_error(error):
+    """Error interno del servidor"""
+    logger.error(f"500: {str(error)}")
+    return jsonify({"code": 500, "error": "Error interno del servidor"}), 500
 
-# ============================================================================
-# MAIN
-# ============================================================================
 
-if __name__ == '__main__':
-    port = config.PORT
-    debug = config.DEBUG
+# ==================== INICIALIZACIÓN ====================
 
-    logger.info(f"SMS Marketing API iniciando...")
-    logger.info(f"Base de datos: {config.DATABASE_URL}")
-    logger.info(f"TraffiLink: {config.TRAFFILINK_URL}")
-    logger.info(f"Debug: {debug}")
-    logger.info(f"Puerto: {port}")
+if __name__ == "__main__":
+    logger.info("🚀 Iniciando servidor Flask...")
+    logger.info("📍 Acceda a http://localhost:5000")
 
-    app.run(debug=debug, host='0.0.0.0', port=port, threaded=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True,
+        use_reloader=False
+    )
